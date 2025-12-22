@@ -9,6 +9,7 @@ import (
 	"github.com/zmap/zgrab2/modules/fox"
 	"github.com/zmap/zgrab2/modules/ftp"
 	"github.com/zmap/zgrab2/modules/http"
+	"github.com/zmap/zgrab2/modules/httpproxy"
 	"github.com/zmap/zgrab2/modules/imap"
 	"github.com/zmap/zgrab2/modules/ipp"
 	"github.com/zmap/zgrab2/modules/memcached"
@@ -37,6 +38,7 @@ func init() {
 		"fox":       &fox.Module{},
 		"ftp":       &ftp.Module{},
 		"http":      &http.Module{},
+		"httpproxy": &httpproxy.Module{},
 		"imap":      &imap.Module{},
 		"ipp":       &ipp.Module{},
 		"memcached": &memcached.Module{},
