@@ -1,8 +1,8 @@
-// Package httpproxy contains the zgrab2 Module implementation for HTTP CONNECT proxy detection.
+// Package httpsconnect contains the zgrab2 Module implementation for HTTP CONNECT proxy detection.
 //
 // This module sends an HTTP CONNECT request to detect if a server is an HTTP/HTTPS proxy.
 // It reports the response status code and headers to determine proxy support.
-package httpproxy
+package httpsconnect
 
 import (
 	"bufio"
@@ -70,10 +70,10 @@ type Scanner struct {
 	dialerGroupConfig *zgrab2.DialerGroupConfig
 }
 
-// RegisterModule registers the httpproxy zgrab2 module.
+// RegisterModule registers the httpsconnect zgrab2 module.
 func RegisterModule() {
 	var module Module
-	_, err := zgrab2.AddCommand("httpproxy", "HTTP CONNECT Proxy Detection", module.Description(), 8080, &module)
+	_, err := zgrab2.AddCommand("httpsconnect", "HTTP CONNECT Proxy Detection", module.Description(), 8080, &module)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	// Determine if proxy is supported based on status code
 	// 2xx status codes indicate success
 	// 407 indicates proxy authentication required (proxy exists but needs auth)
-	results.ProxySupported = (statusCode >= 200 && statusCode < 400) || statusCode == 407 || statusCode == 403 ||  statusCode == 404
+	results.ProxySupported = (statusCode >= 200 && statusCode < 400) || statusCode == 407 || statusCode == 403 || statusCode == 404
 
 	return zgrab2.SCAN_SUCCESS, &results, nil
 }
