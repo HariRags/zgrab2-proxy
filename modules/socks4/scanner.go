@@ -28,7 +28,7 @@ type Flags struct {
 	UseSocks4a bool   `long:"socks4a" description:"Use SOCKS4a protocol (domain name resolution on server)"`
 	DestIP     string `long:"dest-ip" default:"1.1.1.1" description:"Destination IP for connect request (SOCKS4 mode)"`
 	DestPort   uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
-	DestDomain string `long:"dest-domain" default:"example.com" description:"Destination domain for connect request (SOCKS4a mode)"`
+	DestDomain string `long:"dest-domain" default:"one.one.one.one" description:"Destination domain for connect request (SOCKS4a mode)"`
 }
 
 // Module implements the zgrab2.Module interface.
