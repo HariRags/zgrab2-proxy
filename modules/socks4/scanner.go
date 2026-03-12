@@ -2,14 +2,19 @@
 package socks4
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
+	"net/textproto"
 	"strconv"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/zmap/zcrypto/tls"
 
 	"github.com/zmap/zgrab2"
 )
@@ -20,15 +25,40 @@ type ScanResults struct {
 	ConnectionResponse            string            `json:"connection_response,omitempty"`
 	ConnectionResponseExplanation map[string]string `json:"connection_response_explanation,omitempty"`
 	IsSOCKS4a                     bool              `json:"is_socks4a,omitempty"`
+
+	// PageStatusCode is the HTTP status code from the page fetch request
+	PageStatusCode int `json:"page_status_code,omitempty"`
+
+	// PageStatusLine is the full status line from the page fetch
+	PageStatusLine string `json:"page_status_line,omitempty"`
+
+	// PageHeaders contains the response headers from the fetched page
+	PageHeaders map[string][]string `json:"page_headers,omitempty"`
+
+	// PageBody contains the content of the fetched page
+	PageBody string `json:"page_body,omitempty"`
+
+	// PageBodyTruncated indicates if the page body was truncated due to size limits
+	PageBodyTruncated bool `json:"page_body_truncated,omitempty"`
+
+	// Error contains any error message if the scan partially failed
+	Error string `json:"error,omitempty"`
 }
 
 // Flags are the SOCKS4-specific command-line flags.
 type Flags struct {
 	zgrab2.BaseFlags
 	UseSocks4a bool   `long:"socks4a" description:"Use SOCKS4a protocol (domain name resolution on server)"`
-	DestIP     string `long:"dest-ip" default:"1.1.1.1" description:"Destination IP for connect request (SOCKS4 mode)"`
+	DestIP     string `long:"dest-ip" default:"104.18.26.120" description:"Destination IP for connect request (SOCKS4 mode) - example.com IP"`
 	DestPort   uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
-	DestDomain string `long:"dest-domain" default:"one.one.one.one" description:"Destination domain for connect request (SOCKS4a mode)"`
+	DestDomain string `long:"dest-domain" default:"example.com" description:"Destination domain for connect request (SOCKS4a mode)"`
+
+	// Page fetching options
+	FetchPage   bool   `long:"fetch-page" description:"Fetch a page through the SOCKS tunnel after successful connection"`
+	PagePath    string `long:"page-path" default:"/" description:"Path to fetch from target server"`
+	MaxPageSize int    `long:"max-page-size" default:"65536" description:"Maximum page content size to read in bytes"`
+	UseHTTPS    bool   `long:"use-https" description:"Use HTTPS for page fetch (default: true if dest port is 443)"`
+	UserAgent   string `long:"user-agent" default:"curl/7.81.0" description:"User-Agent header value"`
 }
 
 // Module implements the zgrab2.Module interface.
@@ -76,7 +106,14 @@ func (m *Module) Description() string {
 
 // Validate flags
 func (f *Flags) Validate(_ []string) (err error) {
-	return
+	if f.MaxPageSize <= 0 {
+		f.MaxPageSize = 65536
+	}
+	// Auto-enable HTTPS if port 443
+	if f.DestPort == 443 && !f.UseHTTPS {
+		f.UseHTTPS = true
+	}
+	return nil
 }
 
 // Help returns this module's help string.
@@ -213,6 +250,119 @@ func (conn *Connection) buildConnectRequestSocks4a() []byte {
 	return req
 }
 
+// buildHTTPRequest builds the HTTP GET request bytes for fetching the page.
+func (conn *Connection) buildHTTPRequest() []byte {
+	var host string
+	if conn.config.UseSocks4a {
+		host = conn.config.DestDomain
+	} else {
+		host = conn.config.DestIP
+	}
+
+	request := fmt.Sprintf(
+		"GET %s HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"User-Agent: %s\r\n"+
+			"Connection: close\r\n"+
+			"\r\n",
+		conn.config.PagePath, host, conn.config.UserAgent)
+	return []byte(request)
+}
+
+// fetchPageContent fetches the page content through the established SOCKS tunnel.
+func (conn *Connection) fetchPageContent(ctx context.Context) error {
+	// If HTTPS is enabled, wrap the connection with TLS
+	var pageConn net.Conn = conn.conn
+	if conn.config.UseHTTPS {
+		var serverName string
+		if conn.config.UseSocks4a {
+			serverName = conn.config.DestDomain
+		} else {
+			serverName = conn.config.DestIP
+		}
+
+		tlsConfig := &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true, // For scanning purposes
+		}
+		pageConn = tls.Client(conn.conn, tlsConfig)
+	}
+
+	// Set deadline if context has one
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := pageConn.SetWriteDeadline(deadline); err != nil {
+			return fmt.Errorf("failed to set write deadline: %w", err)
+		}
+		if err := pageConn.SetReadDeadline(deadline); err != nil {
+			return fmt.Errorf("failed to set read deadline: %w", err)
+		}
+	}
+
+	// Send HTTP GET request
+	request := conn.buildHTTPRequest()
+	_, err := pageConn.Write(request)
+	if err != nil {
+		return fmt.Errorf("failed to send HTTP request: %w", err)
+	}
+
+	// Read response
+	response := make([]byte, conn.config.MaxPageSize)
+	n, err := pageConn.Read(response)
+	if err != nil && err != io.EOF && n == 0 {
+		return fmt.Errorf("failed to read HTTP response: %w", err)
+	}
+
+	responseData := response[:n]
+
+	// Parse response
+	reader := bufio.NewReader(strings.NewReader(string(responseData)))
+	tp := textproto.NewReader(reader)
+
+	// Read status line
+	statusLine, err := tp.ReadLine()
+	if err != nil {
+		return fmt.Errorf("failed to read HTTP status line: %w", err)
+	}
+
+	// Parse status code
+	parts := strings.SplitN(statusLine, " ", 3)
+	if len(parts) < 2 {
+		return fmt.Errorf("malformed HTTP status line: %s", statusLine)
+	}
+
+	statusCode, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return fmt.Errorf("invalid HTTP status code: %s", parts[1])
+	}
+
+	// Read headers
+	headers, err := tp.ReadMIMEHeader()
+	if err != nil && err.Error() != "EOF" {
+		headers = make(map[string][]string)
+	}
+
+	// Read body
+	remainingData := string(responseData)
+	// Find where headers end (look for \r\n\r\n)
+	headerEnd := strings.Index(remainingData, "\r\n\r\n")
+	var body string
+	if headerEnd != -1 {
+		body = remainingData[headerEnd+4:]
+	} else {
+		body = ""
+	}
+	truncated := n >= conn.config.MaxPageSize
+
+	// Store results
+	conn.results.PageStatusCode = statusCode
+	conn.results.PageStatusLine = statusLine
+	conn.results.PageHeaders = headers
+	conn.results.PageBody = body
+	conn.results.PageBodyTruncated = truncated
+
+	return nil
+}
+
 // PerformConnectionRequest sends a connection request to the SOCKS4 server.
 func (conn *Connection) PerformConnectionRequest() error {
 	var req []byte
@@ -263,6 +413,18 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	err = socks4Conn.PerformConnectionRequest()
 	if err != nil {
 		return zgrab2.TryGetScanStatus(err), &socks4Conn.results, fmt.Errorf("error during connection request: %w", err)
+	}
+
+	// If connection was successful and page fetching is enabled, fetch the page
+	if scanner.config.FetchPage {
+		pageErr := socks4Conn.fetchPageContent(ctx)
+		if pageErr != nil {
+			if socks4Conn.results.Error == "" {
+				socks4Conn.results.Error = fmt.Sprintf("page fetch failed: %v", pageErr)
+			} else {
+				socks4Conn.results.Error += fmt.Sprintf("; page fetch failed: %v", pageErr)
+			}
+		}
 	}
 
 	return zgrab2.SCAN_SUCCESS, &socks4Conn.results, nil
