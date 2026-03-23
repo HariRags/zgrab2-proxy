@@ -204,7 +204,7 @@ func (scanner *Scanner) buildHTTPRequest() []byte {
 		"GET %s HTTP/1.1\r\n"+
 			"Host: %s\r\n"+
 			"User-Agent: %s\r\n"+
-			"Connection: close\r\n"+
+			"Accept: */*\r\n"+
 			"\r\n",
 		scanner.config.PagePath, scanner.config.ConnectHost, scanner.config.UserAgent)
 	return []byte(request)
