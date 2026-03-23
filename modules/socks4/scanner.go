@@ -253,17 +253,13 @@ func (conn *Connection) buildConnectRequestSocks4a() []byte {
 // buildHTTPRequest builds the HTTP GET request bytes for fetching the page.
 func (conn *Connection) buildHTTPRequest() []byte {
 	var host string
-	if conn.config.UseSocks4a {
-		host = conn.config.DestDomain
-	} else {
-		host = conn.config.DestIP
-	}
+	host = conn.config.DestDomain
 
 	request := fmt.Sprintf(
 		"GET %s HTTP/1.1\r\n"+
 			"Host: %s\r\n"+
 			"User-Agent: %s\r\n"+
-			"Connection: close\r\n"+
+			"Accept: */*\r\n"+
 			"\r\n",
 		conn.config.PagePath, host, conn.config.UserAgent)
 	return []byte(request)
