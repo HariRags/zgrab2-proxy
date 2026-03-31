@@ -48,6 +48,7 @@ type ScanResults struct {
 // Flags are the SOCKS5-specific command-line flags.
 type Flags struct {
 	zgrab2.BaseFlags
+	DestDomain string `long:"dest-domain" default:"example.com" description:"Destination domain for connect request (used for SOCKS4a or as SNI for HTTPS)"`
 	DestAddr string `long:"dest-addr" default:"104.18.27.120" description:"Destination address for connect request (IPv4 or IPv6)"`
 	DestPort uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
 
@@ -313,7 +314,7 @@ func (conn *Connection) PerformConnectionRequest() error {
 // buildHTTPRequest builds the HTTP GET request bytes for fetching the page.
 func (conn *Connection) buildHTTPRequest() []byte {
 	var host string
-	host = conn.config.DestAddr
+	host = conn.config.DestDomain
 
 	request := fmt.Sprintf(
 		"GET %s HTTP/1.1\r\n"+
@@ -331,7 +332,7 @@ func (conn *Connection) fetchPageContent(ctx context.Context) error {
 	var pageConn net.Conn = conn.conn
 	if conn.config.UseHTTPS {
 		var serverName string
-		serverName = conn.config.DestAddr
+		serverName = conn.config.DestDomain
 
 		tlsConfig := &tls.Config{
 			ServerName:         serverName,
