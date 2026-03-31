@@ -327,6 +327,7 @@ func (conn *Connection) buildHTTPRequest() []byte {
 }
 
 // fetchPageContent fetches the page content through the established SOCKS tunnel.
+// fetchPageContent fetches the page content through the established SOCKS tunnel.
 func (conn *Connection) fetchPageContent(ctx context.Context) error {
 	// If HTTPS is enabled, wrap the connection with TLS
 	var pageConn net.Conn = conn.conn
@@ -358,48 +359,63 @@ func (conn *Connection) fetchPageContent(ctx context.Context) error {
 		return fmt.Errorf("failed to send HTTP request: %w", err)
 	}
 
-	// Read HTTP response
-	reader := bufio.NewReader(pageConn)
+	// Read response using a single Read to avoid keep-alive hangs
+	response := make([]byte, conn.config.MaxPageSize)
+	n, err := pageConn.Read(response)
+	if err != nil && err != io.EOF && n == 0 {
+		return fmt.Errorf("failed to read HTTP response: %w", err)
+	}
+
+	responseData := response[:n]
+
+	// Parse response
+	reader := bufio.NewReader(strings.NewReader(string(responseData)))
 	tp := textproto.NewReader(reader)
 
 	// Read status line
 	statusLine, err := tp.ReadLine()
 	if err != nil {
-		return fmt.Errorf("failed to read status line: %w", err)
+		return fmt.Errorf("failed to read HTTP status line: %w", err)
 	}
-	conn.results.PageStatusLine = statusLine
 
 	// Parse status code
 	parts := strings.SplitN(statusLine, " ", 3)
-	if len(parts) >= 2 {
-		statusCode, err := strconv.Atoi(parts[1])
-		if err == nil {
-			conn.results.PageStatusCode = statusCode
-		}
+	if len(parts) < 2 {
+		return fmt.Errorf("malformed HTTP status line: %s", statusLine)
+	}
+
+	statusCode, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return fmt.Errorf("invalid HTTP status code: %s", parts[1])
 	}
 
 	// Read headers
 	headers, err := tp.ReadMIMEHeader()
-	if err != nil {
-		return fmt.Errorf("failed to read headers: %w", err)
+	if err != nil && err.Error() != "EOF" {
+		headers = make(map[string][]string)
 	}
-	conn.results.PageHeaders = headers
 
 	// Read body
-	body, err := io.ReadAll(io.LimitReader(reader, int64(conn.config.MaxPageSize)))
-	if err != nil {
-		return fmt.Errorf("failed to read body: %w", err)
+	remainingData := string(responseData)
+	// Find where headers end (look for \r\n\r\n)
+	headerEnd := strings.Index(remainingData, "\r\n\r\n")
+	var body string
+	if headerEnd != -1 {
+		body = remainingData[headerEnd+4:]
+	} else {
+		body = ""
 	}
-	conn.results.PageBody = string(body)
+	truncated := n >= conn.config.MaxPageSize
 
-	// Check if body was truncated
-	if len(body) == conn.config.MaxPageSize {
-		conn.results.PageBodyTruncated = true
-	}
+	// Store results
+	conn.results.PageStatusCode = statusCode
+	conn.results.PageStatusLine = statusLine
+	conn.results.PageHeaders = headers
+	conn.results.PageBody = body
+	conn.results.PageBodyTruncated = truncated
 
 	return nil
 }
-
 // Scan performs the configured scan on the SOCKS5 server.
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
 	conn, err := dialGroup.Dial(ctx, target)
