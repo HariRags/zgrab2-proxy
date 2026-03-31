@@ -48,8 +48,8 @@ type ScanResults struct {
 // Flags are the SOCKS5-specific command-line flags.
 type Flags struct {
 	zgrab2.BaseFlags
-	DestDomain string `long:"dest-domain" default:"example.com" description:"Destination domain for connect request"`
-	DestPort   uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
+	DestAddr string `long:"dest-addr" default:"104.18.27.120" description:"Destination address for connect request (IPv4 or IPv6)"`
+	DestPort uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
 
 	// Page fetching options
 	FetchPage   bool   `long:"fetch-page" description:"Fetch a page through the SOCKS tunnel after successful connection"`
@@ -232,8 +232,10 @@ func getAddressTypeDescription(code byte) string {
 // PerformHandshake performs the SOCKS5 handshake.
 func (conn *Connection) PerformHandshake() (bool, error) {
 	// Send version identifier/method selection message
-	verMethodSel := []byte{0x05, 0x01, 0x00} // VER = 0x05, NMETHODS = 1, METHODS = 0x00 (NO AUTHENTICATION REQUIRED)
-	err := conn.sendCommand(verMethodSel)
+	// VER = 0x05, NMETHODS = 2, METHODS = 0x00 (NO AUTH), 0x01 (GSSAPI)
+	methods := []byte{0x05, 0x02, 0x00, 0x01}
+
+	err := conn.sendCommand(methods)
 	if err != nil {
 		return false, fmt.Errorf("error sending version identifier/method selection: %w", err)
 	}
@@ -256,21 +258,37 @@ func (conn *Connection) PerformHandshake() (bool, error) {
 // PerformConnectionRequest sends a connection request to the SOCKS5 server.
 func (conn *Connection) PerformConnectionRequest() error {
 	// Send a connection request
-	// VER = 0x05, CMD = CONNECT, RSV = 0x00, ATYP = DOMAINNAME, DST.ADDR = destDomain, DST.PORT = destPort
-	domain := conn.config.DestDomain
-	domainLen := len(domain)
+	// VER = 0x05, CMD = CONNECT, RSV = 0x00
 	port := conn.config.DestPort
+	addr := net.ParseIP(conn.config.DestAddr)
+	if addr == nil {
+		return fmt.Errorf("invalid destination address: %s", conn.config.DestAddr)
+	}
 
-	// Construct the request
-	req := make([]byte, 5+domainLen+2)
-	req[0] = 0x05 // VER
-	req[1] = 0x01 // CMD
-	req[2] = 0x00 // RSV
-	req[3] = 0x03 // ATYP
-	req[4] = byte(domainLen)
-	copy(req[5:], []byte(domain))
-	req[5+domainLen] = byte(port >> 8)
-	req[5+domainLen+1] = byte(port)
+	var req []byte
+	if ipv4 := addr.To4(); ipv4 != nil {
+		// ATYP = IPV4
+		req = make([]byte, 4+net.IPv4len+2)
+		req[0] = 0x05 // VER
+		req[1] = 0x01 // CMD
+		req[2] = 0x00 // RSV
+		req[3] = 0x01 // ATYP
+		copy(req[4:], ipv4)
+		req[4+net.IPv4len] = byte(port >> 8)
+		req[4+net.IPv4len+1] = byte(port)
+	} else if ipv6 := addr.To16(); ipv6 != nil {
+		// ATYP = IPV6
+		req = make([]byte, 4+net.IPv6len+2)
+		req[0] = 0x05 // VER
+		req[1] = 0x01 // CMD
+		req[2] = 0x00 // RSV
+		req[3] = 0x04 // ATYP
+		copy(req[4:], ipv6)
+		req[4+net.IPv6len] = byte(port >> 8)
+		req[4+net.IPv6len+1] = byte(port)
+	} else {
+		return fmt.Errorf("invalid IP address: %s", conn.config.DestAddr)
+	}
 
 	err := conn.sendCommand(req)
 	if err != nil {
@@ -295,7 +313,7 @@ func (conn *Connection) PerformConnectionRequest() error {
 // buildHTTPRequest builds the HTTP GET request bytes for fetching the page.
 func (conn *Connection) buildHTTPRequest() []byte {
 	var host string
-	host = conn.config.DestDomain
+	host = conn.config.DestAddr
 
 	request := fmt.Sprintf(
 		"GET %s HTTP/1.1\r\n"+
@@ -313,7 +331,7 @@ func (conn *Connection) fetchPageContent(ctx context.Context) error {
 	var pageConn net.Conn = conn.conn
 	if conn.config.UseHTTPS {
 		var serverName string
-		serverName = conn.config.DestDomain
+		serverName = conn.config.DestAddr
 
 		tlsConfig := &tls.Config{
 			ServerName:         serverName,
