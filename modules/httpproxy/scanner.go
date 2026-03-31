@@ -182,8 +182,8 @@ func (scanner *Scanner) buildProxyRequest() []byte {
 		"%s %s HTTP/1.1\r\n"+
 			"Host: %s\r\n"+
 			"User-Agent: %s\r\n"+
-			"Proxy-Connection: Keep-Alive\r\n"+
 			"Accept: */*\r\n"+
+			"Proxy-Connection: Keep-Alive\r\n"+
 			"\r\n",
 		scanner.config.Method, scanner.config.TargetURL, host, scanner.config.UserAgent)
 	return []byte(request)
