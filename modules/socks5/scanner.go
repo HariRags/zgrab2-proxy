@@ -406,7 +406,6 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	if err != nil {
 		return zgrab2.TryGetScanStatus(err), nil, fmt.Errorf("error opening connection to %s: %w", target.String(), err)
 	}
-	defer zgrab2.CloseConnAndHandleError(conn)
 
 	results := ScanResults{}
 	socks5Conn := Connection{conn: conn, config: scanner.config, results: results}
@@ -432,6 +431,6 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 			return zgrab2.SCAN_SUCCESS, &socks5Conn.results, nil
 		}
 	}
-
+	conn.Close()
 	return zgrab2.SCAN_SUCCESS, &socks5Conn.results, nil
 }
