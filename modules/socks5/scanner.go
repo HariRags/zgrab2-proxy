@@ -2,14 +2,19 @@
 package socks5
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/textproto"
 	"strconv"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/zmap/zcrypto/tls"
 
 	"github.com/zmap/zgrab2"
 )
@@ -20,11 +25,38 @@ type ScanResults struct {
 	MethodSelection               string            `json:"method_selection,omitempty"`
 	ConnectionResponse            string            `json:"connection_response,omitempty"`
 	ConnectionResponseExplanation map[string]string `json:"connection_response_explanation,omitempty"`
+
+	// PageStatusCode is the HTTP status code from the page fetch request
+	PageStatusCode int `json:"page_status_code,omitempty"`
+
+	// PageStatusLine is the full status line from the page fetch
+	PageStatusLine string `json:"page_status_line,omitempty"`
+
+	// PageHeaders contains the response headers from the fetched page
+	PageHeaders map[string][]string `json:"page_headers,omitempty"`
+
+	// PageBody contains the content of the fetched page
+	PageBody string `json:"page_body,omitempty"`
+
+	// PageBodyTruncated indicates if the page body was truncated due to size limits
+	PageBodyTruncated bool `json:"page_body_truncated,omitempty"`
+
+	// Error contains any error message if the scan partially failed
+	Error string `json:"error,omitempty"`
 }
 
 // Flags are the SOCKS5-specific command-line flags.
 type Flags struct {
 	zgrab2.BaseFlags
+	DestDomain string `long:"dest-domain" default:"example.com" description:"Destination domain for connect request"`
+	DestPort   uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
+
+	// Page fetching options
+	FetchPage   bool   `long:"fetch-page" description:"Fetch a page through the SOCKS tunnel after successful connection"`
+	PagePath    string `long:"page-path" default:"/" description:"Path to fetch from target server"`
+	MaxPageSize int    `long:"max-page-size" default:"65536" description:"Maximum page content size to read in bytes"`
+	UseHTTPS    bool   `long:"use-https" description:"Use HTTPS for page fetch (default: true if dest port is 443)"`
+	UserAgent   string `long:"user-agent" default:"curl/7.81.0" description:"User-Agent header value"`
 }
 
 // Module implements the zgrab2.Module interface.
@@ -72,7 +104,14 @@ func (m *Module) Description() string {
 
 // Validate flags
 func (f *Flags) Validate(_ []string) (err error) {
-	return
+	if f.MaxPageSize <= 0 {
+		f.MaxPageSize = 65536
+	}
+	// Auto-enable HTTPS if port 443
+	if f.DestPort == 443 && !f.UseHTTPS {
+		f.UseHTTPS = true
+	}
+	return nil
 }
 
 // Help returns this module's help string.
@@ -217,7 +256,22 @@ func (conn *Connection) PerformHandshake() (bool, error) {
 // PerformConnectionRequest sends a connection request to the SOCKS5 server.
 func (conn *Connection) PerformConnectionRequest() error {
 	// Send a connection request
-	req := []byte{0x05, 0x01, 0x00, 0x01, 0xA6, 0x6F, 0x04, 0x64, 0x00, 0x50} // VER = 0x05, CMD = CONNECT, RSV = 0x00, ATYP = IPv4, DST.ADDR = 166.111.4.100, DST.PORT = 80
+	// VER = 0x05, CMD = CONNECT, RSV = 0x00, ATYP = DOMAINNAME, DST.ADDR = destDomain, DST.PORT = destPort
+	domain := conn.config.DestDomain
+	domainLen := len(domain)
+	port := conn.config.DestPort
+
+	// Construct the request
+	req := make([]byte, 5+domainLen+2)
+	req[0] = 0x05 // VER
+	req[1] = 0x01 // CMD
+	req[2] = 0x00 // RSV
+	req[3] = 0x03 // ATYP
+	req[4] = byte(domainLen)
+	copy(req[5:], []byte(domain))
+	req[5+domainLen] = byte(port >> 8)
+	req[5+domainLen+1] = byte(port)
+
 	err := conn.sendCommand(req)
 	if err != nil {
 		return fmt.Errorf("error sending connection request: %w", err)
@@ -231,8 +285,97 @@ func (conn *Connection) PerformConnectionRequest() error {
 	conn.results.ConnectionResponse = hex.EncodeToString(resp)
 	conn.results.ConnectionResponseExplanation = explainResponse(resp)
 
-	if resp[1] > 0x80 {
+	if resp[1] > 0x00 {
 		return fmt.Errorf("connection request failed with response: %x", resp)
+	}
+
+	return nil
+}
+
+// buildHTTPRequest builds the HTTP GET request bytes for fetching the page.
+func (conn *Connection) buildHTTPRequest() []byte {
+	var host string
+	host = conn.config.DestDomain
+
+	request := fmt.Sprintf(
+		"GET %s HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"User-Agent: %s\r\n"+
+			"Accept: */*\r\n"+
+			"\r\n",
+		conn.config.PagePath, host, conn.config.UserAgent)
+	return []byte(request)
+}
+
+// fetchPageContent fetches the page content through the established SOCKS tunnel.
+func (conn *Connection) fetchPageContent(ctx context.Context) error {
+	// If HTTPS is enabled, wrap the connection with TLS
+	var pageConn net.Conn = conn.conn
+	if conn.config.UseHTTPS {
+		var serverName string
+		serverName = conn.config.DestDomain
+
+		tlsConfig := &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true, // For scanning purposes
+		}
+		pageConn = tls.Client(conn.conn, tlsConfig)
+	}
+
+	// Set deadline if context has one
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := pageConn.SetWriteDeadline(deadline); err != nil {
+			return fmt.Errorf("failed to set write deadline: %w", err)
+		}
+		if err := pageConn.SetReadDeadline(deadline); err != nil {
+			return fmt.Errorf("failed to set read deadline: %w", err)
+		}
+	}
+
+	// Send HTTP GET request
+	request := conn.buildHTTPRequest()
+	_, err := pageConn.Write(request)
+	if err != nil {
+		return fmt.Errorf("failed to send HTTP request: %w", err)
+	}
+
+	// Read HTTP response
+	reader := bufio.NewReader(pageConn)
+	tp := textproto.NewReader(reader)
+
+	// Read status line
+	statusLine, err := tp.ReadLine()
+	if err != nil {
+		return fmt.Errorf("failed to read status line: %w", err)
+	}
+	conn.results.PageStatusLine = statusLine
+
+	// Parse status code
+	parts := strings.SplitN(statusLine, " ", 3)
+	if len(parts) >= 2 {
+		statusCode, err := strconv.Atoi(parts[1])
+		if err == nil {
+			conn.results.PageStatusCode = statusCode
+		}
+	}
+
+	// Read headers
+	headers, err := tp.ReadMIMEHeader()
+	if err != nil {
+		return fmt.Errorf("failed to read headers: %w", err)
+	}
+	conn.results.PageHeaders = headers
+
+	// Read body
+	body, err := io.ReadAll(io.LimitReader(reader, int64(conn.config.MaxPageSize)))
+	if err != nil {
+		return fmt.Errorf("failed to read body: %w", err)
+	}
+	conn.results.PageBody = string(body)
+
+	// Check if body was truncated
+	if len(body) == conn.config.MaxPageSize {
+		conn.results.PageBodyTruncated = true
 	}
 
 	return nil
@@ -240,7 +383,6 @@ func (conn *Connection) PerformConnectionRequest() error {
 
 // Scan performs the configured scan on the SOCKS5 server.
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
-	var have_auth bool
 	conn, err := dialGroup.Dial(ctx, target)
 	if err != nil {
 		return zgrab2.TryGetScanStatus(err), nil, fmt.Errorf("error opening connection to %s: %w", target.String(), err)
@@ -250,7 +392,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	results := ScanResults{}
 	socks5Conn := Connection{conn: conn, config: scanner.config, results: results}
 
-	have_auth, err = socks5Conn.PerformHandshake()
+	have_auth, err := socks5Conn.PerformHandshake()
 	if err != nil {
 		if have_auth {
 			return zgrab2.SCAN_SUCCESS, &socks5Conn.results, nil
@@ -262,6 +404,14 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	err = socks5Conn.PerformConnectionRequest()
 	if err != nil {
 		return zgrab2.TryGetScanStatus(err), &socks5Conn.results, fmt.Errorf("error during connection request: %w", err)
+	}
+
+	if scanner.config.FetchPage {
+		err = socks5Conn.fetchPageContent(ctx)
+		if err != nil {
+			socks5Conn.results.Error = err.Error()
+			return zgrab2.SCAN_SUCCESS, &socks5Conn.results, nil
+		}
 	}
 
 	return zgrab2.SCAN_SUCCESS, &socks5Conn.results, nil
