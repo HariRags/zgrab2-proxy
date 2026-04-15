@@ -49,8 +49,8 @@ type ScanResults struct {
 type Flags struct {
 	zgrab2.BaseFlags
 	DestDomain string `long:"dest-domain" default:"example.com" description:"Destination domain for connect request (used for SOCKS4a or as SNI for HTTPS)"`
-	DestAddr string `long:"dest-addr" default:"104.18.27.120" description:"Destination address for connect request (IPv4 or IPv6)"`
-	DestPort uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
+	DestAddr   string `long:"dest-addr" default:"104.18.27.120" description:"Destination address for connect request (IPv4 or IPv6)"`
+	DestPort   uint16 `long:"dest-port" default:"80" description:"Destination port for connect request"`
 
 	// Page fetching options
 	FetchPage   bool   `long:"fetch-page" description:"Fetch a page through the SOCKS tunnel after successful connection"`
@@ -233,8 +233,13 @@ func getAddressTypeDescription(code byte) string {
 // PerformHandshake performs the SOCKS5 handshake.
 func (conn *Connection) PerformHandshake() (bool, error) {
 	// Send version identifier/method selection message
-	// VER = 0x05, NMETHODS = 2, METHODS = 0x00 (NO AUTH), 0x01 (GSSAPI)
-	methods := []byte{0x05, 0x02, 0x00, 0x01}
+	// VER = 0x05, NMETHODS = 255, METHODS = 0x00..0xFE
+	methods := make([]byte, 2+255)
+	methods[0] = 0x05
+	methods[1] = 255
+	for i := 0; i < 255; i++ {
+		methods[2+i] = byte(i)
+	}
 
 	err := conn.sendCommand(methods)
 	if err != nil {
@@ -416,6 +421,7 @@ func (conn *Connection) fetchPageContent(ctx context.Context) error {
 
 	return nil
 }
+
 // Scan performs the configured scan on the SOCKS5 server.
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
 	conn, err := dialGroup.Dial(ctx, target)
