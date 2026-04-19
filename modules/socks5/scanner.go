@@ -233,12 +233,20 @@ func getAddressTypeDescription(code byte) string {
 // PerformHandshake performs the SOCKS5 handshake.
 func (conn *Connection) PerformHandshake() (bool, error) {
 	// Send version identifier/method selection message
-	// VER = 0x05, NMETHODS = 255, METHODS = 0x00..0xFE
-	methods := make([]byte, 2+255)
-	methods[0] = 0x05
-	methods[1] = 255
-	for i := 0; i < 255; i++ {
-		methods[2+i] = byte(i)
+	// VER = 0x05, NMETHODS = 10, METHODS = 0x00..0x09
+	methods := []byte{
+		0x05, // VER
+		10,   // NMETHODS
+		0x00, // No authentication
+		0x01, // GSSAPI (RFC 1961)
+		0x02, // Username/password (RFC 1929)
+		0x03, // Challenge-Handshake Authentication Protocol
+		0x04, // Unassigned
+		0x05, // Challenge-Response Authentication Method
+		0x06, // Secure Sockets Layer
+		0x07, // NDS Authentication
+		0x08, // Multi-Authentication Framework
+		0x09, // JSON Parameter Block
 	}
 
 	err := conn.sendCommand(methods)
